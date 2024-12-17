@@ -125,21 +125,21 @@ logging.basicConfig(
 def calculate_mic_sensitivity(room_size):
     """
     Oda büyüklüğüne göre mikrofon hassasiyetini hesaplar
-    20m² ve altı odalar için temel hassasiyet: 2.0
-    Her 5m² artış için %25 hassasiyet artışı
+    
+    Yeni mantık:
+    - 20m² ve altı odalar için: temel gürültü + 15 dB
+    - 20-50m² arası odalar için: temel gürültü + 10 dB
+    - 50m² üstü odalar için: temel gürültü + 5 dB
     """
     if room_size is None:
-        return 2.0  # Varsayılan değer
+        return 15
         
-    base_sensitivity = 2.0  # Temel hassasiyeti artırdık
-    
     if room_size <= 20:
-        return base_sensitivity
+        return 15
+    elif room_size <= 50:
+        return 10
     else:
-        # Her 5m² için %25 artış
-        extra_area = room_size - 20
-        extra_sensitivity = (extra_area / 5) * 0.25
-        return base_sensitivity + extra_sensitivity
+        return 5
 
 def save_device_info():
     """
@@ -171,13 +171,20 @@ def load_device_info():
     try:
         with open(device_info_file, 'r', encoding='utf-8') as f:
             device_info = json.load(f)
+            print(f"DEBUG: Loading device info from file: {device_info}")  # Debug için
+            
             device_id = device_info.get('device_id')
             room_number = device_info.get('room_number')
             institution_name = device_info.get('institution_name')
             city_name = device_info.get('city_name')
             room_size_global = device_info.get('room_size')
             base_noise_level = device_info.get('base_noise_level')
-            THRESHOLD = device_info.get('threshold')
+            THRESHOLD = device_info.get('threshold')  # Direkt dosyadan okunan değeri kullan
+            
+            print(f"DEBUG: Loaded values:")
+            print(f"Base noise: {base_noise_level}")
+            print(f"Room size: {room_size_global}")
+            print(f"Threshold: {THRESHOLD}")
             
             is_setup_complete = all([
                 device_id, room_number, institution_name, 
@@ -187,7 +194,8 @@ def load_device_info():
             if is_setup_complete:
                 calibration_complete.set()
             return is_setup_complete
-    except (FileNotFoundError, json.JSONDecodeError):
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        print(f"DEBUG: Error loading device info: {e}")
         return False
 
 def reset_device_info():
@@ -233,8 +241,8 @@ class AudioProcessor:
         self.max_recording_seconds = 30
         
         # dB ayarları - düşük threshold
-        self.db_threshold = THRESHOLD - 10
-        self.db_silence_threshold = (THRESHOLD - 10) - 15
+        self.db_threshold = THRESHOLD
+        self.db_silence_threshold = THRESHOLD - 15
         
         # Oda ve mikrofon ayarları
         self.room_length = None
@@ -1004,8 +1012,8 @@ def start_calibration(message):
             base_noise_level = noise_level
             
             # Yeni threshold hesaplaması
-            sensitivity_multiplier = calculate_mic_sensitivity(room_size_global)
-            THRESHOLD = base_noise_level + (15 * sensitivity_multiplier)  # 20'den 15'e düşürdük
+            sensitivity_value = calculate_mic_sensitivity(room_size_global)
+            THRESHOLD = base_noise_level + sensitivity_value  # Artık sensitivity_multiplier yerine direct sensitivity_value kullanıyoruz
             
             save_device_info()
             
@@ -1020,7 +1028,7 @@ def start_calibration(message):
                 f"🚪 Oda: {room_number}\n"
                 f"📏 Oda Büyüklüğü: {room_size_global} m²\n"
                 f"🎤 Temel Gürültü Seviyesi: {noise_level:.2f} dB\n"
-                f"⚡ Hassasiyet çarpanı: {sensitivity_multiplier:.2f}\n"
+                f"⚡ Hassasiyet değeri: +{sensitivity_value} dB\n"  # sensitivity_multiplier yerine sensitivity_value
                 f"📊 Eşik değeri: {THRESHOLD:.2f} dB\n\n"
                 f"⚠️ Sistem yeniden başlatılıyor..."
             )
@@ -1034,9 +1042,6 @@ def start_calibration(message):
                 "❌ Kalibrasyon sırasında bir hata oluştu.\n"
                 "Lütfen ortamın sessiz olduğundan emin olup tekrar deneyin.")
             bot.register_next_step_handler(msg, start_calibration)
-    else:
-        msg = bot.reply_to(message, "Kalibrasyon için 'Hazır' yazın.")
-        bot.register_next_step_handler(msg, start_calibration)
 
 @bot.message_handler(commands=['start'])
 def start_setup(message):
