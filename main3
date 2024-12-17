@@ -1,0 +1,1324 @@
+import os
+import asyncio
+import numpy as np
+import time
+import wave
+from ftplib import FTP
+import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+from threading import Thread, Event, Lock
+import subprocess
+from datetime import datetime
+from dotenv import load_dotenv
+import alsaaudio
+import statistics
+import queue
+import xml.etree.ElementTree as ET
+from xml.dom import minidom
+import json
+import uuid
+import sys
+import threading
+from collections import deque
+import logging
+import traceback
+import webrtcvad
+import requests
+import aiohttp
+import io
+import pyaudio
+
+# Global Events for setup control
+setup_in_progress = threading.Event()
+setup_complete = threading.Event()
+
+# Load environment variables
+load_dotenv('/home/econowsound/econow_sound/soundsecrets.env')
+print("Environment variables loaded.")
+
+# Configuration
+CHUNK = 2048
+FORMAT = alsaaudio.PCM_FORMAT_S16_LE
+CHANNELS = 1
+RATE = 44100
+THRESHOLD = 60  # Will be updated after calibration
+EMERGENCY_PHONE = os.getenv('EMERGENCY_PHONE', '+901234567890')
+
+# Environment variables
+FTP_HOST = os.getenv('FTP_HOST')
+FTP_PORT = int(os.getenv('FTP_PORT'))
+FTP_USER = os.getenv('FTP_USER')
+FTP_PASSWORD = os.getenv('FTP_PASSWORD')
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+
+# Developer IDs
+DEVELOPER_CHAT_IDS = [int(chat_id) for chat_id in os.getenv('DEVELOPER_IDS', '').split(',')]
+if not DEVELOPER_CHAT_IDS:
+    DEVELOPER_CHAT_IDS = [int(os.getenv('DEVELOPER_ID'))]
+
+# API URLs
+WHISPER_API_URL = "http://100.115.147.10/transcribe"
+WHISPER_API_KEY = "Ns182wZvHM7DIHM4FOISQw8z9qfEvNO5QoybInxcAQg"
+YOLO_API_URL = "http://100.100.214.75:5002/detect_human"
+
+# Global variables
+is_running = threading.Event()
+last_notification_time = 0
+is_recording = False
+stop_recording = Event()
+bot = telebot.TeleBot(BOT_TOKEN)
+room_number = None
+institution_name = None
+city_name = None
+room_size_global = None
+is_setup_complete = False
+base_noise_level = None
+calibration_complete = Event()
+ftp_upload_queue = queue.Queue()
+ftp_lock = Lock()
+device_id = None
+device_info_file = '/home/econowsound/econow_sound/deviceinfo.txt'
+
+# Bad word detection globals
+last_bad_word_time = 0
+bad_word_cooldown = 60
+last_processed_texts = deque(maxlen=5)
+
+# Type 1 and Type 2 bad words
+TYPE1_BAD_WORDS = [
+    "mal", "it", "piç", "şerefsiz", "namussuz", "top", "göt", "nankör", 
+    "adi herif", "kaltak", "aşağılık", "bok herif", "kahrolası", "lanet pislik", 
+    "çirkef", "yüzsüz", "arsız", "haysiyetsiz", "çakal", "seni öldürürüm", 
+    "gebertirim", "boğarım", "sikerim", "döverim"
+]
+
+TYPE2_BAD_WORDS = [
+    "amına koyayım", "siktir git", "orospu", "pezevenk", "ibne", "yarrak", "sik",
+    "ananı", "ananın", "karını", "karının", "orospu çocuğu", "orospu evladı", "yarram",
+    "kahpe", "orospu kızı", "Allah belanı versin", "Allah seni kahretsin", "canını sıkarım",
+    "gözüm görmesin seni", "lanet olsun sana", "Allah seni bildiği gibi yapsın",
+    "bıktım senden", "öl artık", "allahın belası", "nefret ediyorum", "ölmeni bekliyorum",
+    "defol git", "yaşlı bunak", "çürümüş", "fosil", "bitmişsin", "işe yaramaz", "gereksiz",
+    "seni istemiyoruz", "artık öl", "ölmelisin", "ölümün geldi", "ölmek bilmiyorsun",
+    "artık öl de kurtulalım", "kurtulmak istiyoruz", "seninle uğraşamam", "yaşlandın artık",
+    "çık git hayatımızdan", "ömür törpüsü", "lanetli yaşlı", "boş beleş", "boş beleş yaşlı",
+    "kurtulmak istiyorum", "sana tahammülüm kalmadı", "öl de kurtulalım",
+    "tiksiniyorum senden", "sana bakmak zorunda değilim", "kendine bakamayacak hale gelmişsin",
+    "artık sana dayanamıyorum", "ihtiyarladın", "çürüyorsun", "senden iğreniyorum",
+    "nefretimi kazanıyorsun", "tahammül edemiyorum", "senin gibilerden nefret ediyorum",
+    "ölüp git", "yeter artık", "her yerin kokuyor",
+    "işemişsin gene", "seni taşımaktan yoruldum", "artık son demlerini yaşıyorsun",
+    "ne zaman öleceksin", "seni hiç sevmiyorum", "ölüp git artık", "bıktım senden artık",
+    "altına işemişsin gene", "senden bıktım", "yaşlanmışsın artık",
+    "çürümüşsün", "nefret ediyorum senden", "seninle işim olmaz", "iğreniyorum senden",
+    "çık git hayatımızdan", "senden kurtulmak istiyorum", "tahammül edemiyorum sana",
+    "altına sıçmışsın"
+]
+
+# Logging settings
+logging.basicConfig(
+    filename='econow_sound.log',
+    level=logging.DEBUG,
+    format='%(asctime)s %(levelname)s:%(message)s'
+)
+
+def calculate_mic_sensitivity(room_size):
+    """
+    Oda büyüklüğüne göre mikrofon hassasiyetini hesaplar
+    20m² ve altı odalar için temel hassasiyet: 2.0
+    Her 5m² artış için %25 hassasiyet artışı
+    """
+    if room_size is None:
+        return 2.0  # Varsayılan değer
+        
+    base_sensitivity = 2.0  # Temel hassasiyeti artırdık
+    
+    if room_size <= 20:
+        return base_sensitivity
+    else:
+        # Her 5m² için %25 artış
+        extra_area = room_size - 20
+        extra_sensitivity = (extra_area / 5) * 0.25
+        return base_sensitivity + extra_sensitivity
+
+def save_device_info():
+    """
+    Cihaz bilgilerini JSON formatında kaydeder
+    """
+    global room_number, base_noise_level, THRESHOLD, device_id, institution_name, city_name, room_size_global
+    
+    if device_id is None:
+        device_id = str(uuid.uuid4())
+    
+    device_info = {
+        'device_id': device_id,
+        'room_number': room_number,
+        'institution_name': institution_name,
+        'city_name': city_name,
+        'room_size': room_size_global,
+        'base_noise_level': float(base_noise_level) if base_noise_level is not None else None,
+        'threshold': float(THRESHOLD) if THRESHOLD is not None else None
+    }
+    print(f"Saving device info: {device_info}")
+    with open(device_info_file, 'w', encoding='utf-8') as f:
+        json.dump(device_info, f, ensure_ascii=False)
+
+def load_device_info():
+    """
+    Kaydedilmiş cihaz bilgilerini yükler
+    """
+    global room_number, base_noise_level, THRESHOLD, device_id, institution_name, city_name, is_setup_complete, room_size_global
+    try:
+        with open(device_info_file, 'r', encoding='utf-8') as f:
+            device_info = json.load(f)
+            device_id = device_info.get('device_id')
+            room_number = device_info.get('room_number')
+            institution_name = device_info.get('institution_name')
+            city_name = device_info.get('city_name')
+            room_size_global = device_info.get('room_size')
+            base_noise_level = device_info.get('base_noise_level')
+            THRESHOLD = device_info.get('threshold')
+            
+            is_setup_complete = all([
+                device_id, room_number, institution_name, 
+                city_name, room_size_global, base_noise_level, THRESHOLD
+            ])
+            
+            if is_setup_complete:
+                calibration_complete.set()
+            return is_setup_complete
+    except (FileNotFoundError, json.JSONDecodeError):
+        return False
+
+def reset_device_info():
+    """
+    Cihaz bilgilerini sıfırlar
+    """
+    global device_id, room_size_global, THRESHOLD
+    device_id = str(uuid.uuid4())  # Yeni device ID oluştur
+    room_size_global = None
+    THRESHOLD = 60.0  # Varsayılan değer
+    save_device_info()
+
+def calculate_db(data):
+    try:
+        audio_data = np.frombuffer(data, dtype=np.int16)
+        if len(audio_data) == 0:
+            return 0.0
+        rms = np.sqrt(np.mean(np.square(audio_data, dtype=np.float64)))
+        if rms > 0:
+            db = 20 * np.log10(rms)
+            return min(max(0, db), 120)
+        return 0.0
+    except Exception as e:
+        print(f"Error in dB calculation: {e}")
+        return 0.0
+
+class AudioProcessor:
+    def __init__(self, chunk_size=1024, rate=44100, channels=1):
+        # Temel ses parametreleri
+        self.chunk_size = chunk_size
+        self.rate = rate
+        self.channels = channels
+        self.format = pyaudio.paInt16
+        
+        # Kayıt yönetimi
+        self.is_running = False
+        self.is_incident_active = False
+        self.recording_start_time = None
+        self.current_incident_id = None
+        
+        # Süre ayarları
+        self.min_recording_seconds = 5
+        self.max_recording_seconds = 30
+        
+        # dB ayarları - düşük threshold
+        self.db_threshold = THRESHOLD - 10
+        self.db_silence_threshold = (THRESHOLD - 10) - 15
+        
+        # Oda ve mikrofon ayarları
+        self.room_length = None
+        self.room_width = None
+        self.near_field_distance = 1.0
+        self.db_history = deque(maxlen=10)
+        
+        # Near-field detection ayarları
+        self.near_field_threshold = 25
+        self.db_spike_ignore = 15
+        
+        # Gürültü azaltma parametreleri
+        self.noise_floor = None
+        self.noise_samples = deque(maxlen=50)
+        self.signal_threshold = 1.5
+        self.calibration_samples = []
+        self.is_calibrated = False
+        self.moving_average = deque(maxlen=5)
+        
+        # Lock ve PyAudio setup
+        self.lock = threading.Lock()
+        self.p = pyaudio.PyAudio()
+        self.stream = None
+        self.error_queue = queue.Queue()
+
+    def calculate_db(self, data):
+        try:
+            audio_data = np.frombuffer(data, dtype=np.int16)
+            if len(audio_data) == 0:
+                return 0.0
+            rms = np.sqrt(np.mean(np.square(audio_data, dtype=np.float64)))
+            if rms > 0:
+                db = 20 * np.log10(rms)
+                return min(max(0, db), 120)
+            return 0.0
+        except Exception as e:
+            print(f"Error in dB calculation: {e}")
+            return 0.0
+
+    def calibrate_noise_floor(self, data, duration=5):
+        if len(self.calibration_samples) < duration * self.rate / self.chunk_size:
+            audio_data = np.frombuffer(data, dtype=np.int16)
+            self.calibration_samples.append(np.abs(audio_data).mean())
+            return False
+        else:
+            sorted_samples = sorted(self.calibration_samples)
+            quiet_samples = sorted_samples[:int(len(sorted_samples) * 0.2)]
+            self.noise_floor = np.mean(quiet_samples)
+            self.is_calibrated = True
+            print(f"Noise floor calibrated: {self.noise_floor}")
+            return True
+
+    def reduce_noise(self, data):
+        try:
+            audio_data = np.frombuffer(data, dtype=np.int16)
+            
+            if not self.is_calibrated or self.noise_floor is None:
+                return data
+            
+            # Gürültü seviyesi hesaplama
+            audio_abs = np.abs(audio_data)
+            noise_mask = audio_abs < self.noise_floor
+            
+            if noise_mask.any():  # Boş slice kontrolü
+                current_noise = np.mean(audio_abs[noise_mask])
+            else:
+                current_noise = 0
+                
+            self.noise_samples.append(current_noise)
+            
+            if len(self.noise_samples) > 0:  # Boş deque kontrolü
+                # Adaptif gürültü eşiği
+                noise_samples_sorted = sorted(self.noise_samples)
+                samples_count = len(noise_samples_sorted)
+                if samples_count > 0:
+                    adaptive_noise_floor = np.mean(
+                        noise_samples_sorted[:max(1, int(samples_count * 0.3))]
+                    )
+                else:
+                    adaptive_noise_floor = self.noise_floor
+            else:
+                adaptive_noise_floor = self.noise_floor
+            
+            # Dinamik gürültü eşiği
+            dynamic_noise_floor = float(adaptive_noise_floor * 1.2)
+            
+            # Spektral alt kesme
+            mask = audio_abs > (dynamic_noise_floor * 1.5)
+            
+            # Sinyal gücü analizi
+            signal_power = float(np.mean(audio_abs))
+            self.moving_average.append(signal_power)
+            
+            if len(self.moving_average) > 0:
+                avg_power = np.mean(list(self.moving_average))
+            else:
+                avg_power = signal_power
+            
+            # Sinyal/gürültü oranı kontrolü
+            snr = signal_power / dynamic_noise_floor if dynamic_noise_floor > 0 else 1.0
+            
+            if snr > self.signal_threshold:
+                # Ana gürültü azaltma
+                cleaned_data = np.zeros_like(audio_data)
+                cleaned_data[mask] = audio_data[mask]
+                
+                # Yumuşak geçiş
+                fade_factor = min(1.0, (snr - self.signal_threshold) / 2)
+                
+                # İkincil gürültü filtresi
+                secondary_mask = audio_abs > (dynamic_noise_floor * 2)
+                cleaned_data[~secondary_mask] = (cleaned_data[~secondary_mask] * 0.5).astype(np.int16)
+                
+                # Son temizlik - explicit type conversion
+                cleaned_data = (cleaned_data * fade_factor).astype(np.int16)
+                
+                return cleaned_data.tobytes()
+            else:
+                # Çok düşük sinyal - tamamen temizle
+                return np.zeros_like(audio_data, dtype=np.int16).tobytes()
+                
+        except Exception as e:
+            print(f"Error in noise reduction: {e}")
+            return data
+
+    def calculate_smart_distance_adjusted_db(self, data):
+        measured_db = self.calculate_db(data)
+        self.db_history.append(measured_db)
+        avg_db = statistics.mean(self.db_history)
+        
+        if self.room_length is None or self.room_width is None:
+            return measured_db
+            
+        max_distance = math.sqrt(self.room_length**2 + self.room_width**2)
+        
+        db_change_rate = 0
+        if len(self.db_history) > 1:
+            db_change_rate = abs(measured_db - self.db_history[-2])
+        
+        if db_change_rate > self.near_field_threshold:
+            if measured_db > self.db_threshold + 10:
+                return measured_db
+            print("\nNear-field sound detected, but processing anyway...")
+        
+        distance_factor = 0
+        
+        if avg_db < self.db_threshold:
+            distance_factor = 25 * math.log10(max_distance/2.0)
+            distance_factor = min(distance_factor, 20)
+            
+        adjusted_db = measured_db + distance_factor
+        
+        print(f"\rMeasured: {measured_db:.2f} dB, Factor: {distance_factor:.2f}, "
+              f"Adjusted: {adjusted_db:.2f}, Change Rate: {db_change_rate:.2f}", 
+              end='', flush=True)
+              
+        return adjusted_db
+
+    def normalize_text(self, text):
+        text = text.lower()
+        replacements = {
+            'İ': 'i', 'I': 'ı',
+            'Ğ': 'ğ', 'Ü': 'ü',
+            'Ş': 'ş', 'Ç': 'ç',
+            'Ö': 'ö'
+        }
+        for old, new in replacements.items():
+            text = text.replace(old, new)
+        
+        text = text.replace(',', ' ').replace('.', ' ').replace('?', ' ').replace('!', ' ')
+        return ' '.join(text.split())
+
+    def word_match(self, bad_word, text):
+        normalized_bad_word = self.normalize_text(bad_word)
+        normalized_text = self.normalize_text(text)
+        
+        if normalized_bad_word in normalized_text:
+            return True
+        
+        text_words = normalized_text.split()
+        bad_word_parts = normalized_bad_word.split()
+        
+        if len(bad_word_parts) == 1:
+            return normalized_bad_word in text_words
+        
+        for i in range(len(text_words)):
+            if i + len(bad_word_parts) <= len(text_words):
+                text_phrase = ' '.join(text_words[i:i + len(bad_word_parts)])
+                if text_phrase == normalized_bad_word:
+                    return True
+                
+                if ''.join(text_words[i:i + len(bad_word_parts)]) == normalized_bad_word.replace(' ', ''):
+                    return True
+        
+        return False
+
+    async def start_incident(self):
+        if not self.is_incident_active:
+            self.current_incident_id = generate_incident_id()
+            self.is_incident_active = True
+            self.recording_start_time = time.time()
+            print(f"\nStarted new incident: {self.current_incident_id}")
+
+    async def end_incident(self):
+        if self.is_incident_active:
+            print(f"Ending incident: {self.current_incident_id}")
+            
+            audio_filename = f"/tmp/{self.current_incident_id}_audio.wav"
+            if os.path.exists(audio_filename):
+                try:
+                    os.remove(audio_filename)
+                except OSError as e:
+                    logging.error(f"Error removing audio file: {e}")
+            
+            photo_filename = f"/tmp/{self.current_incident_id}_photo.jpg"
+            if os.path.exists(photo_filename):
+                try:
+                    os.remove(photo_filename)
+                except OSError as e:
+                    logging.error(f"Error removing photo file: {e}")
+            
+            self.is_incident_active = False
+            self.current_incident_id = None
+            self.recording_start_time = None
+            print("Incident ended")
+
+    async def process_audio(self):
+        try:
+            print("Opening audio device...")
+            self.stream = self.p.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=44100,
+                input=True,
+                frames_per_buffer=2048,
+                input_device_index=2
+            )
+            print("Audio device opened successfully")
+            
+            while self.is_running:
+                try:
+                    raw_data = self.stream.read(self.chunk_size)
+                    db = self.calculate_db(raw_data)
+                    print(f"\rCurrent dB: {db:.2f}, Threshold: {self.db_threshold:.2f}", end='')
+
+                    if db > self.db_threshold:
+                        print(f"\nHigh volume detected: {db:.2f} dB")
+                        await self.start_incident()
+                        await self.record_audio_segment()
+                    
+                    elif self.is_incident_active and db < self.db_silence_threshold:
+                        print("\nSilence detected, ending incident")
+                        await self.end_incident()
+                    
+                    await asyncio.sleep(0.001)
+                    
+                except IOError as e:
+                    print(f"Stream read error: {e}")
+                    
+        except Exception as e:
+            print(f"Critical error in process_audio: {str(e)}")
+            logging.error(f"Audio processing error: {str(e)}")
+            traceback.print_exc()
+        finally:
+            if self.stream:
+                self.stream.stop_stream()
+                self.stream.close()
+            
+    async def record_audio_segment(self):
+        frames = []
+        print("\nRecording started...")
+        
+        wav_filename = f"/tmp/{self.current_incident_id}_audio.wav"
+        
+        for _ in range(0, int(self.rate / self.chunk_size * self.min_recording_seconds)):
+            if not self.is_incident_active:
+                break
+            try:
+                data = self.stream.read(self.chunk_size)
+                frames.append(data)
+            except IOError as e:
+                print(f"Recording error: {e}")
+                break
+
+        if frames:
+            print(f"Recording completed - {len(frames)} frames")
+            
+            with wave.open(wav_filename, 'wb') as wf:
+                wf.setnchannels(self.channels)
+                wf.setsampwidth(self.p.get_sample_size(self.format))
+                wf.setframerate(self.rate)
+                wf.writeframes(b''.join(frames))
+            
+            transcript = await self.transcribe_audio(wav_filename)
+            
+            if transcript:
+                print(f"Transcription: {transcript}")
+                
+                normalized_transcript = self.normalize_text(transcript)
+                special_phrases = [
+                    "altyazı m.k",
+                    "altyazı m. k",
+                    "izlediğiniz için teşekkürler"
+                ]
+                
+                if any(phrase in normalized_transcript for phrase in special_phrases):
+                    print("Special phrase detected, ignoring...")
+                    return
+                
+                type2_words = []
+                type1_words = []
+                
+                type2_detected = False
+                for word in TYPE2_BAD_WORDS:
+                    if self.word_match(word, transcript):
+                        type2_words.append(word)
+                        type2_detected = True
+                        break
+
+                if not type2_detected:
+                    for word in TYPE1_BAD_WORDS:
+                        if self.word_match(word, transcript):
+                            type1_words.append(word)
+
+                if type2_words or type1_words:
+                    photo_filename = f"/tmp/{self.current_incident_id}_photo.jpg"
+                    await capture_photo(photo_filename)
+                    human_detected, human_count = await detect_human([photo_filename])
+                    risk_level = "Yüksek" if human_count >= 2 else "Düşük"
+                    
+                    await self.handle_bad_word_detection(
+                        "ACİL DURUM" if type2_words else "Tip 1",
+                        transcript,
+                        type2_words if type2_words else type1_words,
+                        wav_filename,
+                        photo_filename,
+                        human_count,
+                        risk_level
+                    )
+
+    async def transcribe_audio(self, filename):
+        try:
+            async with aiohttp.ClientSession() as session:
+                data = aiohttp.FormData()
+                data.add_field(
+                    name='file',
+                    value=open(filename, 'rb'),
+                    filename='audio.wav',
+                    content_type='audio/wav'
+                )
+                data.add_field('language', 'tr')
+                headers = {'X-API-KEY': WHISPER_API_KEY}
+                
+                async with session.post(WHISPER_API_URL, data=data, headers=headers) as response:
+                    print(f"API Response Status: {response.status}")
+                    if response.status == 200:
+                        result = await response.json()
+                        return result.get('transcription', '')
+                    return None
+        except Exception as e:
+            print(f"Transcription error: {e}")
+            return None
+
+    async def handle_bad_word_detection(self, incident_type, transcript, detected_words, audio_file, photo_file, human_count, risk_level):
+        try:
+            alert_message = (
+                f"[{device_id}] numaralı cihazda {incident_type} tespit edildi.\n"
+                f"Kurum: {institution_name}\n"
+                f"Şehir: {city_name}\n"
+                f"Oda: {room_number}\n"
+                f"Odadaki tespit edilebilen kişi sayısı: {human_count}\n"
+                f"Risk Durumu: {risk_level}\n"
+                f"Transkript: {transcript}\n"
+                f"Tespit edilen kelimeler: {', '.join(detected_words)}\n\n"
+                f"☎️ Acil Durum Telefon: {EMERGENCY_PHONE}"
+            )
+            
+            # Telegram bildirimi gönder - 3 deneme hakkı
+            telegram_sent = False
+            for attempt in range(3):
+                try:
+                    if await send_telegram_message(alert_message, photo_path=photo_file, audio_path=audio_file):
+                        telegram_sent = True
+                        print("Telegram notification sent successfully")
+                        break
+                    await asyncio.sleep(2 * (attempt + 1))
+                except Exception as e:
+                    print(f"Telegram send attempt {attempt + 1} failed: {e}")
+            
+            if not telegram_sent:
+                print("Failed to send Telegram notification after 3 attempts")
+            
+            # XML raporu oluştur
+            incident_data = {
+                "incident_id": self.current_incident_id,
+                "timestamp": datetime.now().isoformat(),
+                "incident_type": incident_type,
+                "transcript": transcript,
+                "detected_words": detected_words,
+                "human_count": human_count,
+                "risk_level": risk_level,
+                "device_info": {
+                    "device_id": device_id,
+                    "institution": institution_name,
+                    "city": city_name,
+                    "room": room_number
+                }
+            }
+            
+            # FTP'ye dosyaları yükle
+            ftp_base_path = f"/EcoNow_Sound/{device_id}/{self.current_incident_id}"
+            
+            try:
+                await create_and_upload_xml(incident_data)
+                print("XML report created and uploaded")
+            except Exception as e:
+                print(f"Error creating/uploading XML: {e}")
+                
+            try:
+                await upload_to_ftp(audio_file, f"{ftp_base_path}/{os.path.basename(audio_file)}")
+                print("Audio file uploaded")
+            except Exception as e:
+                print(f"Error uploading audio: {e}")
+                
+            try:
+                await upload_to_ftp(photo_file, f"{ftp_base_path}/{os.path.basename(photo_file)}")
+                print("Photo file uploaded")
+            except Exception as e:
+                print(f"Error uploading photo: {e}")
+            
+        except Exception as e:
+            print(f"Error in handle_bad_word_detection: {e}")
+            logging.error(f"Bad word detection handling error: {e}\n{traceback.format_exc()}")
+            self.error_queue.put({
+                'type': 'notification',
+                'data': {
+                    'incident_type': incident_type,
+                    'transcript': transcript,
+                    'detected_words': detected_words
+                }
+            })
+
+    def stop(self):
+        """Ses işleme sistemini durdurur"""
+        print("Stopping audio processing system...")
+        self.is_running = False
+        if self.stream:
+            self.stream.stop_stream()
+            self.stream.close()
+        self.p.terminate()
+        print("Audio processing system stopped")
+
+    def start(self):
+        """Ses işleme sistemini başlatır"""
+        print("Starting audio processing system...")
+        self.is_running = True
+        asyncio.create_task(self.process_audio())
+
+# Utility Functions
+async def delete_ftp_folder(ftp_path):
+    try:
+        with FTP() as ftp:
+            ftp.connect(FTP_HOST, FTP_PORT, timeout=30)
+            ftp.login(FTP_USER, FTP_PASSWORD)
+            
+            try:
+                ftp.cwd(ftp_path)
+                file_list = ftp.nlst()
+                for file in file_list:
+                    try:
+                        ftp.delete(file)
+                    except:
+                        print(f"Could not delete file: {file}")
+            except:
+                print(f"Could not access path: {ftp_path}")
+            
+            try:
+                ftp.rmd(ftp_path)
+                print(f"Successfully cleaned up FTP folder: {ftp_path}")
+            except:
+                print(f"Could not delete folder: {ftp_path}")
+                
+    except Exception as e:
+        print(f"FTP cleanup error: {e}")
+
+def generate_incident_id():
+    timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+    random_id = str(uuid.uuid4())[:8]
+    return f"INC-{timestamp}-{random_id}"
+
+async def detect_human(photo_paths):
+    try:
+        files = [('image', (f'image{i}.jpg', open(path, 'rb'), 'image/jpeg')) 
+                 for i, path in enumerate(photo_paths)]
+        print(f"Sending photos to YOLO API: {YOLO_API_URL}")
+        
+        response = requests.post(YOLO_API_URL, files=files)
+        print(f"YOLO API response: {response.status_code}")
+        
+        if response.status_code == 202:
+            task_id = response.json().get('task_id')
+            if task_id:
+                return await wait_for_yolo_result(task_id)
+        elif response.status_code == 200:
+            result = response.json()
+            human_detected = any(result.get('human_detected', [False]))
+            human_count = sum(result.get('human_count', [0]))
+            print(f"YOLO detection: {human_detected}, Count: {human_count}")
+            return human_detected, human_count
+        return False, 0
+    except Exception as e:
+        print(f"YOLO API error: {e}")
+        return False, 0
+
+async def wait_for_yolo_result(task_id, max_wait=30, interval=2):
+    start_time = time.time()
+    url = f"http://100.100.214.75:5002/task_result/{task_id}"
+    
+    async with aiohttp.ClientSession() as session:
+        while time.time() - start_time < max_wait:
+            try:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        if result.get('state') == 'SUCCESS':
+                            human_detected = result['result'][0]
+                            human_count = result['result'][1] if len(result['result']) > 1 else 1 if human_detected else 0
+                            return human_detected, human_count
+                await asyncio.sleep(interval)
+            except Exception as e:
+                print(f"Error getting YOLO result: {e}")
+                await asyncio.sleep(interval)
+    return False, 0
+
+async def capture_photo(filename):
+    print(f"Taking photo: {filename}")
+    try:
+        subprocess.run([
+            "libcamera-jpeg",
+            "-o", filename,
+            "-t", "1",
+            "--width", "1920",
+            "--height", "1080",
+            "--nopreview"
+        ], check=True, capture_output=True)
+        print(f"Photo captured successfully: {filename}")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"Error capturing photo: {e}")
+        return False
+
+async def create_and_upload_xml(incident_data):
+    root = ET.Element("incident")
+    device_info = ET.SubElement(root, "device_info")
+    ET.SubElement(device_info, "device_id").text = str(device_id)
+    ET.SubElement(device_info, "room_number").text = str(room_number)
+    ET.SubElement(device_info, "institution").text = str(institution_name)
+    ET.SubElement(device_info, "city").text = str(city_name)
+    
+    incident_details = ET.SubElement(root, "incident_details")
+    for key, value in incident_data.items():
+        element = ET.SubElement(incident_details, key)
+        if isinstance(value, list):
+            element.text = json.dumps(value)
+        else:
+            element.text = str(value)
+
+    xml_str = minidom.parseString(ET.tostring(root)).toprettyxml(indent="  ")
+    filename = f"/tmp/incident_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xml"
+    
+    with open(filename, "w", encoding='utf-8') as f:
+        f.write(xml_str)
+
+    ftp_path = f"/EcoNow_Sound/{device_id}/{incident_data['incident_id']}/incident_report.xml"
+    await upload_to_ftp(filename, ftp_path)
+    try:
+        os.remove(filename)
+    except OSError as e:
+        print(f"Error removing XML file: {e}")
+
+async def upload_to_ftp(filename, ftp_path):
+    print(f"Uploading to FTP: {filename}")
+    try:
+        if not os.path.exists(filename):
+            print(f"File not found: {filename}")
+            return False
+
+        with FTP() as ftp:
+            ftp.connect(FTP_HOST, FTP_PORT, timeout=30)
+            ftp.login(FTP_USER, FTP_PASSWORD)
+
+            folders = ftp_path.split('/')
+            current_path = ""
+            for folder in folders[:-1]:
+                if folder:
+                    current_path += "/" + folder
+                    try:
+                        ftp.cwd(current_path)
+                    except:
+                        ftp.mkd(current_path)
+                        ftp.cwd(current_path)
+
+            with open(filename, 'rb') as file:
+                ftp.storbinary(f'STOR {folders[-1]}', file)
+
+        print(f"File successfully uploaded: {ftp_path}")
+        return True
+    except Exception as e:
+        print(f"FTP upload error: {e}")
+        if os.path.exists(filename):
+            ftp_upload_queue.put((filename, ftp_path))
+        return False
+
+async def process_ftp_queue():
+    while True:
+        try:
+            filename, ftp_path = ftp_upload_queue.get(block=False)
+            if os.path.exists(filename):
+                if await upload_to_ftp(filename, ftp_path):
+                    print(f"Queued file uploaded: {filename}")
+                    os.remove(filename)
+                else:
+                    ftp_upload_queue.put((filename, ftp_path))
+            else:
+                print(f"File not found, removing from queue: {filename}")
+        except queue.Empty:
+            await asyncio.sleep(60)
+
+async def send_telegram_message(message, photo_path=None, audio_path=None, reply_markup=None):
+    global last_notification_time
+    current_time = time.time()
+    success = False
+    
+    try:
+        if current_time - last_notification_time < 10:
+            await asyncio.sleep(10 - (current_time - last_notification_time))
+        
+        for chat_id in DEVELOPER_CHAT_IDS:
+            try:
+                if photo_path and os.path.exists(photo_path):
+                    with open(photo_path, 'rb') as photo:
+                        bot.send_photo(chat_id, photo, caption=message, reply_markup=reply_markup)
+                else:
+                    bot.send_message(chat_id, message, reply_markup=reply_markup)
+
+                if audio_path and os.path.exists(audio_path):
+                    with open(audio_path, 'rb') as audio:
+                        bot.send_audio(chat_id, audio)
+                
+                success = True
+            except Exception as e:
+                print(f"Telegram error for chat_id {chat_id}: {e}")
+                continue
+
+        last_notification_time = time.time()
+        return success
+        
+    except Exception as e:
+        print(f"Telegram general error: {e}")
+        return False
+
+def generate_device_id():
+    return str(uuid.uuid4())
+
+def save_device_info():
+    global room_number, base_noise_level, THRESHOLD, device_id, institution_name, city_name
+    device_info = {
+        'device_id': device_id,
+        'room_number': room_number,
+        'institution_name': institution_name,
+        'city_name': city_name,
+        'base_noise_level': float(base_noise_level) if base_noise_level is not None else None,
+        'threshold': float(THRESHOLD) if THRESHOLD is not None else None
+    }
+    print(f"Saving device info: {device_info}")
+    with open(device_info_file, 'w', encoding='utf-8') as f:
+        json.dump(device_info, f, ensure_ascii=False)
+
+def load_device_info():
+    global room_number, base_noise_level, THRESHOLD, device_id, institution_name, city_name, is_setup_complete
+    try:
+        with open(device_info_file, 'r', encoding='utf-8') as f:
+            device_info = json.load(f)
+            device_id = device_info.get('device_id')
+            room_number = device_info.get('room_number')
+            institution_name = device_info.get('institution_name')
+            city_name = device_info.get('city_name')
+            base_noise_level = device_info.get('base_noise_level')
+            THRESHOLD = device_info.get('threshold')
+            is_setup_complete = all([device_id, room_number, institution_name, city_name, base_noise_level, THRESHOLD])
+            if is_setup_complete:
+                calibration_complete.set()
+            return is_setup_complete
+    except (FileNotFoundError, json.JSONDecodeError):
+        return False
+
+def reset_device_info():
+    global device_id
+    if device_id:
+        save_device_info()
+    else:
+        with open(device_info_file, 'w') as f:
+            f.write('')
+
+def calibrate_noise_level():
+    global THRESHOLD, base_noise_level
+    print("Starting calibration...")
+    
+    try:
+        inp = alsaaudio.PCM(alsaaudio.PCM_CAPTURE, 
+                           channels=CHANNELS, 
+                           rate=RATE,
+                           format=FORMAT, 
+                           periodsize=CHUNK,
+                           cardindex=2)
+        
+        samples = []
+        start_time = time.time()
+        recent_values = deque(maxlen=5)
+        
+        while time.time() - start_time < 30:
+            l, data = inp.read()
+            if l:
+                db = calculate_db(data)
+                if db > 0:  # Sadece geçerli değerleri al
+                    recent_values.append(db)
+                
+                if len(recent_values) > 0:
+                    avg_db = statistics.mean(recent_values)
+                    samples.append(avg_db)
+                    remaining_time = 30 - int(time.time() - start_time)
+                    print(f"\rCalibrating: {avg_db:.2f} dB - {remaining_time}s remaining", end='', flush=True)
+        
+        # En düşük ve en yüksek %10'luk dilimi çıkar
+        if samples:
+            samples.sort()
+            cut_size = int(len(samples) * 0.1)
+            filtered_samples = samples[cut_size:-cut_size] if len(samples) > 20 else samples
+            
+            base_noise_level = statistics.mean(filtered_samples)
+            THRESHOLD = base_noise_level + 30
+            
+            print(f"\nCalibration completed:")
+            print(f"Base noise level: {base_noise_level:.2f} dB")
+            print(f"Threshold: {THRESHOLD:.2f} dB")
+            
+            calibration_complete.set()
+            save_device_info()
+            return base_noise_level
+        else:
+            raise ValueError("No valid samples collected during calibration")
+            
+    except Exception as e:
+        print(f"Calibration error: {e}")
+        raise
+
+# Telegram Bot Handlers
+def start_calibration(message):
+    print(f"DEBUG: Received calibration ready message: {message.text}")
+    if message.text.lower() == 'hazır':
+        try:
+            print("DEBUG: Starting calibration")
+            bot.reply_to(message, "Kalibrasyon başlıyor. Lütfen 30 saniye sessiz kalın.")
+            
+            noise_level = calibrate_noise_level()
+            global base_noise_level, THRESHOLD
+            base_noise_level = noise_level
+            
+            # Yeni threshold hesaplaması
+            sensitivity_multiplier = calculate_mic_sensitivity(room_size_global)
+            THRESHOLD = base_noise_level + (15 * sensitivity_multiplier)  # 20'den 15'e düşürdük
+            
+            save_device_info()
+            
+            setup_complete.set()
+            setup_in_progress.clear()
+            
+            bot.send_message(message.chat.id, 
+                f"✅ Kurulum başarıyla tamamlandı!\n\n"
+                f"📊 Yapılandırma Özeti:\n"
+                f"🏢 Kurum: {institution_name}\n"
+                f"🌆 Şehir: {city_name}\n"
+                f"🚪 Oda: {room_number}\n"
+                f"📏 Oda Büyüklüğü: {room_size_global} m²\n"
+                f"🎤 Temel Gürültü Seviyesi: {noise_level:.2f} dB\n"
+                f"⚡ Hassasiyet çarpanı: {sensitivity_multiplier:.2f}\n"
+                f"📊 Eşik değeri: {THRESHOLD:.2f} dB\n\n"
+                f"⚠️ Sistem yeniden başlatılıyor..."
+            )
+            
+            time.sleep(3)
+            os.execv(sys.executable, ['python3'] + sys.argv)
+            
+        except Exception as e:
+            print(f"DEBUG: Calibration error: {e}")
+            msg = bot.reply_to(message, 
+                "❌ Kalibrasyon sırasında bir hata oluştu.\n"
+                "Lütfen ortamın sessiz olduğundan emin olup tekrar deneyin.")
+            bot.register_next_step_handler(msg, start_calibration)
+    else:
+        msg = bot.reply_to(message, "Kalibrasyon için 'Hazır' yazın.")
+        bot.register_next_step_handler(msg, start_calibration)
+
+@bot.message_handler(commands=['start'])
+def start_setup(message):
+    print(f"DEBUG: Received /start from chat_id: {message.chat.id}")
+    try:
+        if message.chat.id not in DEVELOPER_CHAT_IDS:
+            bot.reply_to(message, "Yetkisiz erişim.")
+            return
+
+        markup = InlineKeyboardMarkup()
+        markup.row(
+            InlineKeyboardButton("Kurulumu Başlat", callback_data="start_setup"),
+            InlineKeyboardButton("İptal", callback_data="cancel_setup")
+        )
+        
+        bot.reply_to(message, 
+            "EcoNow Sound Kurulum Sihirbazına Hoş Geldiniz.\n\n"
+            "Kurulum sırasında şu bilgilere ihtiyaç duyulacak:\n"
+            "1. Odanın uzun duvar uzunluğu (metre)\n"
+            "2. Odanın kısa duvar uzunluğu (metre)\n"
+            "3. Oda numarası\n"
+            "4. Kurum adı\n"
+            "5. Şehir adı\n\n"
+            "Kuruluma başlamak için aşağıdaki butona tıklayın.", 
+            reply_markup=markup)
+
+    except Exception as e:
+        print(f"DEBUG: Error in start_setup: {e}")
+        bot.reply_to(message, "Bir hata oluştu. Lütfen tekrar deneyin.")
+
+@bot.message_handler(commands=['reset'])
+def handle_reset(message):
+    print(f"DEBUG: Received /reset from chat_id: {message.chat.id}")
+    try:
+        if message.chat.id not in DEVELOPER_CHAT_IDS:
+            bot.reply_to(message, "Yetkisiz erişim.")
+            return
+
+        markup = InlineKeyboardMarkup()
+        markup.row(
+            InlineKeyboardButton("Evet, Yeniden Kur", callback_data="confirm_reset"),
+            InlineKeyboardButton("İptal", callback_data="cancel_reset")
+        )
+        
+        bot.reply_to(message, 
+                    "⚠️ DİKKAT: Cihaz ayarları sıfırlanacak ve yeniden kurulum başlayacak.\n\n"
+                    "Devam etmek istiyor musunuz?", 
+                    reply_markup=markup)
+
+    except Exception as e:
+        print(f"DEBUG: Error in reset handler: {e}")
+        bot.reply_to(message, "Bir hata oluştu. Lütfen tekrar deneyin.")
+
+@bot.message_handler(commands=['status'])
+def handle_status(message):
+    print(f"DEBUG: Received /status from chat_id: {message.chat.id}")
+    try:
+        if message.chat.id not in DEVELOPER_CHAT_IDS:
+            bot.reply_to(message, "Yetkisiz erişim.")
+            return
+
+        if not is_setup_complete:
+            bot.reply_to(message, "❌ Cihaz henüz kurulum yapılmamış.")
+            return
+
+        status_message = (
+            f"📊 Cihaz Durumu:\n\n"
+            f"🏢 Kurum: {institution_name}\n"
+            f"🌆 Şehir: {city_name}\n"
+            f"🚪 Oda: {room_number}\n"
+            f"📏 Oda Büyüklüğü: {room_size_global} m²\n"
+            f"🎤 Temel Gürültü Seviyesi: {base_noise_level:.2f} dB\n"
+            f"⚡ Eşik Değeri: {THRESHOLD:.2f} dB\n"
+            f"🆔 Cihaz ID: {device_id}\n"
+            f"✅ Durum: Çalışıyor"
+        )
+        
+        bot.reply_to(message, status_message)
+
+    except Exception as e:
+        print(f"DEBUG: Error in status handler: {e}")
+        bot.reply_to(message, "Bir hata oluştu. Lütfen tekrar deneyin.")
+
+@bot.callback_query_handler(func=lambda call: True)
+def handle_setup_callback(call):
+    print(f"DEBUG: Callback received: {call.data}")
+    try:
+        if call.data == "start_setup":
+            print("DEBUG: Setup start button pressed")
+            setup_in_progress.set()
+            print(f"DEBUG: Setup in progress status: {setup_in_progress.is_set()}")
+            
+            bot.answer_callback_query(call.id)
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text="Kurulum başlatılıyor..."
+            )
+            
+            time.sleep(1)
+            
+            msg = bot.send_message(
+                call.message.chat.id, 
+                "Lütfen oda büyüklüğünü metrekare cinsinden girin (sadece sayı):"
+            )
+            bot.register_next_step_handler(msg, get_room_size)
+            
+        elif call.data == "cancel_setup":
+            print("DEBUG: Setup cancelled")
+            setup_in_progress.clear()
+            print(f"DEBUG: Setup in progress status: {setup_in_progress.is_set()}")
+            
+            bot.answer_callback_query(call.id)
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text="Kurulum iptal edildi. Hazır olduğunuzda /start komutunu kullanın."
+            )
+            
+        elif call.data == "confirm_reset":
+            print("DEBUG: Reset confirmed")
+            global room_number, institution_name, city_name, base_noise_level, THRESHOLD
+            global device_id, is_setup_complete, room_size_global
+            
+            room_number = None
+            institution_name = None
+            city_name = None
+            base_noise_level = None
+            THRESHOLD = 60
+            room_size_global = None
+            is_setup_complete = False
+            
+            reset_device_info()
+            
+            bot.answer_callback_query(call.id)
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text="Cihaz ayarları sıfırlandı. Program yeniden başlatılıyor..."
+            )
+            
+            time.sleep(2)
+            os.execv(sys.executable, ['python3'] + sys.argv)
+            
+        elif call.data == "cancel_reset":
+            bot.answer_callback_query(call.id)
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text="Sıfırlama işlemi iptal edildi."
+            )
+            
+    except Exception as e:
+        print(f"DEBUG: Error in callback handler: {e}")
+        bot.send_message(call.message.chat.id, "Bir hata oluştu. Lütfen tekrar deneyin.")
+
+def get_room_size(message):
+    print(f"DEBUG: Received room size: {message.text}")
+    try:
+        room_size = float(message.text)
+        global room_size_global
+        room_size_global = room_size
+        
+        sensitivity = calculate_mic_sensitivity(room_size)
+        print(f"DEBUG: Calculated sensitivity for {room_size} m²: {sensitivity}")
+        
+        msg = bot.reply_to(message, "Lütfen oda numarasını girin (sadece sayı):")
+        bot.register_next_step_handler(msg, get_room_number)
+        
+    except ValueError:
+        msg = bot.reply_to(message, "Lütfen geçerli bir sayı girin (örnek: 25.5):")
+        bot.register_next_step_handler(msg, get_room_size)
+
+def get_room_number(message):
+    print(f"DEBUG: Received room number: {message.text}")
+    try:
+        room_num = int(message.text)
+        global room_number
+        room_number = room_num
+        save_device_info()
+        print(f"DEBUG: Room number saved: {room_number}")
+        
+        msg = bot.reply_to(message, "Kurum adını girin:")
+        bot.register_next_step_handler(msg, get_institution_name)
+    except ValueError:
+        msg = bot.reply_to(message, "Lütfen geçerli bir sayı girin (örnek: 101):")
+        bot.register_next_step_handler(msg, get_room_number)
+
+def get_institution_name(message):
+    print(f"DEBUG: Received institution name: {message.text}")
+    global institution_name
+    institution_name = message.text
+    save_device_info()
+    print(f"DEBUG: Institution name saved: {institution_name}")
+    
+    msg = bot.reply_to(message, "Şehir adını girin:")
+    bot.register_next_step_handler(msg, get_city_name)
+
+def get_city_name(message):
+    print(f"DEBUG: Received city name: {message.text}")
+    global city_name
+    city_name = message.text
+    save_device_info()
+    print(f"DEBUG: City name saved: {city_name}")
+    
+    msg = bot.reply_to(message, 
+        "ÖNEMLİ: Mikrofon odanın çapraz üst tarafına konumlandırılmalıdır.\n\n"
+        "1. Mikrofonun konumu odanın üst köşelerinden birine yakın olmalı\n"
+        "2. Mikrofon aşağı doğru açılı şekilde konumlandırılmalı\n"
+        "3. Etrafında ses emici/engelleyici cisimler olmamalı\n\n"
+        "Cihazın doğru monte edildiğinden emin olun.\n"
+        "Kalibrasyon için hazır olduğunuzda 'Hazır' yazın.\n\n"
+        "Not: Kalibrasyon sırasında oda tamamen sessiz olmalıdır."
+    )
+    bot.register_next_step_handler(msg, start_calibration)
+
+# Main application flow
+async def main():
+   try:
+       print("DEBUG: Program başlatılıyor...")
+       logging.info("Program started")
+       
+       developer_ids = os.getenv('DEVELOPER_IDS', '').split(',')
+       print(f"DEBUG: Developer IDs from env: {developer_ids}")
+       
+       is_setup_complete = load_device_info()
+       print(f"DEBUG: Setup complete status: {is_setup_complete}")
+       
+       if not is_setup_complete:
+           print("DEBUG: Setup incomplete, starting bot only")
+           bot_thread = Thread(target=bot.polling, kwargs={'none_stop': True})
+           bot_thread.start()
+           
+           while not setup_complete.is_set():
+               if setup_in_progress.is_set():
+                   print("DEBUG: Setup in progress...")
+               else:
+                   print("DEBUG: Waiting for setup to start...")
+               await asyncio.sleep(5)
+           
+           print("DEBUG: Setup completed, restarting program")
+           bot.stop_polling()
+           bot_thread.join()
+           sys.exit(0)
+       
+       print("DEBUG: Setup is complete, starting audio processor")
+       audio_processor = AudioProcessor()
+       audio_processor.start()
+       
+       print("DEBUG: Starting FTP queue process")
+       ftp_queue_task = asyncio.create_task(process_ftp_queue())
+       
+       print("DEBUG: Starting Telegram bot")
+       bot_thread = Thread(target=bot.polling, kwargs={'none_stop': True})
+       bot_thread.start()
+       
+       print("DEBUG: Sending startup message")
+       await send_telegram_message("EcoNow Sound started and running.")
+       
+       while True:
+           await asyncio.sleep(1)
+           
+   except Exception as e:
+       print(f"DEBUG: Error in main: {e}")
+       logging.error(f"Program error: {e}\n{traceback.format_exc()}")
+       await send_telegram_message(f"Program error: {e}")
+       
+   finally:
+       print("DEBUG: Shutting down program...")
+       if 'audio_processor' in locals():
+           audio_processor.stop()
+       if 'bot_thread' in locals():
+           bot.stop_polling()
+           bot_thread.join()
+       print("DEBUG: Program terminated")
+
+if __name__ == "__main__":
+   try:
+       asyncio.run(main())
+   except KeyboardInterrupt:
+       print("\nProgram terminated by user.")
+   except Exception as e:
+       print(f"Fatal error: {e}")
+       traceback.print_exc()
+       logging.error(f"Fatal error: {e}\n{traceback.format_exc()}")
