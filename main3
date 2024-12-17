@@ -415,30 +415,6 @@ class AudioProcessor:
         text = text.replace(',', ' ').replace('.', ' ').replace('?', ' ').replace('!', ' ')
         return ' '.join(text.split())
 
-    def word_match(self, bad_word, text):
-        normalized_bad_word = self.normalize_text(bad_word)
-        normalized_text = self.normalize_text(text)
-        
-        if normalized_bad_word in normalized_text:
-            return True
-        
-        text_words = normalized_text.split()
-        bad_word_parts = normalized_bad_word.split()
-        
-        if len(bad_word_parts) == 1:
-            return normalized_bad_word in text_words
-        
-        for i in range(len(text_words)):
-            if i + len(bad_word_parts) <= len(text_words):
-                text_phrase = ' '.join(text_words[i:i + len(bad_word_parts)])
-                if text_phrase == normalized_bad_word:
-                    return True
-                
-                if ''.join(text_words[i:i + len(bad_word_parts)]) == normalized_bad_word.replace(' ', ''):
-                    return True
-        
-        return False
-
     async def start_incident(self):
         if not self.is_incident_active:
             self.current_incident_id = generate_incident_id()
@@ -685,6 +661,66 @@ class AudioProcessor:
                 }
             })
 
+    def word_match(self, bad_word, text):
+        # Olası yanlış tanımaların sözlüğü
+        possibilities = {
+            "nankör": ["anker"],
+            "adi herif": ["vadi herif", "hadi herif", "kerif"],
+            "boğarım": ["boru"],
+            "ibne": ["gibne"],
+            "allahın belası": ["allah'ın belası", "allahın bela"],
+            "yarrak": ["yarak", "yarrağım"],
+            "orospu evladı": ["orospu evladım"],
+            "eşek": ["beşik"],
+            "sik": ["piks", "fiks", "bit", "piksin"],
+            "şerefsiz": ["terefsiz", "yerefsiz"],
+            "namussuz": ["hamussuz", "humutsuz", "haa mussuz"],
+            "göt": ["yut", "götsün", "göt sür"],
+            "amına koyduğumun": ["hamana koydumun", "adına koduğumun"],
+            "çirkef": ["çirket"],
+            "kaltak": ["bir ayet etmiş kaltak"],
+            "lanet pislik": ["lanetbislik"]
+        }
+        
+        normalized_text = self.normalize_text(text)
+        normalized_bad_word = self.normalize_text(bad_word)
+        
+        # Ana kelimeyi kontrol et
+        if normalized_bad_word in normalized_text:
+            print(f"Debug: Doğrudan eşleşme bulundu: {bad_word}")
+            return True
+            
+        # Eğer bu kelime için alternatif yazımlar varsa, onları da kontrol et
+        if normalized_bad_word in possibilities:
+            for alt in possibilities[normalized_bad_word]:
+                if self.normalize_text(alt) in normalized_text:
+                    print(f"Debug: Alternatif eşleşme bulundu: {bad_word} -> {alt}")
+                    return True
+        
+        # Kelime parçalarını kontrol et (önceki mantık)
+        text_words = normalized_text.split()
+        bad_word_parts = normalized_bad_word.split()
+        
+        if len(bad_word_parts) == 1:
+            return normalized_bad_word in text_words
+        
+        for i in range(len(text_words)):
+            if i + len(bad_word_parts) <= len(text_words):
+                text_phrase = ' '.join(text_words[i:i + len(bad_word_parts)])
+                if text_phrase == normalized_bad_word:
+                    return True
+                
+                if ''.join(text_words[i:i + len(bad_word_parts)]) == normalized_bad_word.replace(' ', ''):
+                    return True
+        
+        return False
+
+    def start(self):
+        """Ses işleme sistemini başlatır"""
+        print("Starting audio processing system...")
+        self.is_running = True
+        asyncio.create_task(self.process_audio())
+
     def stop(self):
         """Ses işleme sistemini durdurur"""
         print("Stopping audio processing system...")
@@ -694,12 +730,6 @@ class AudioProcessor:
             self.stream.close()
         self.p.terminate()
         print("Audio processing system stopped")
-
-    def start(self):
-        """Ses işleme sistemini başlatır"""
-        print("Starting audio processing system...")
-        self.is_running = True
-        asyncio.create_task(self.process_audio())
 
 # Utility Functions
 async def delete_ftp_folder(ftp_path):
@@ -1260,6 +1290,7 @@ def get_city_name(message):
 
 # Main application flow
 async def main():
+   audio_processor = None  # En başta None olarak tanımla
    try:
        print("DEBUG: Program başlatılıyor...")
        logging.info("Program started")
@@ -1311,7 +1342,7 @@ async def main():
        
    finally:
        print("DEBUG: Shutting down program...")
-       if 'audio_processor' in locals():
+       if audio_processor is not None:  # None kontrolü ile
            audio_processor.stop()
        if 'bot_thread' in locals():
            bot.stop_polling()
@@ -1319,11 +1350,11 @@ async def main():
        print("DEBUG: Program terminated")
 
 if __name__ == "__main__":
-   try:
-       asyncio.run(main())
-   except KeyboardInterrupt:
-       print("\nProgram terminated by user.")
-   except Exception as e:
-       print(f"Fatal error: {e}")
-       traceback.print_exc()
-       logging.error(f"Fatal error: {e}\n{traceback.format_exc()}")
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nProgram terminated by user.")
+    except Exception as e:
+        print(f"Fatal error: {e}")
+        traceback.print_exc()
+        logging.error(f"Fatal error: {e}\n{traceback.format_exc()}")
