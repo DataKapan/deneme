@@ -107,12 +107,12 @@ TYPE2_BAD_WORDS = [
     "artık sana dayanamıyorum", "ihtiyarladın", "çürüyorsun", "senden iğreniyorum",
     "nefretimi kazanıyorsun", "tahammül edemiyorum", "senin gibilerden nefret ediyorum",
     "ölüp git", "yeter artık", "her yerin kokuyor",
-    "işemişsin gene", "seni taşımaktan yoruldum", "artık son demlerini yaşıyorsun",
+    "işemişsin gene", "seni taşımaktan yoruldum", "artık son demlerin",
     "ne zaman öleceksin", "seni hiç sevmiyorum", "ölüp git artık", "bıktım senden artık",
     "altına işemişsin gene", "senden bıktım", "yaşlanmışsın artık",
-    "çürümüşsün", "nefret ediyorum senden", "seninle işim olmaz", "iğreniyorum senden",
+    "çürümüşsün", "nefret ediyorum senden", "seninle işim olmaz", "iğreniyorum",
     "çık git hayatımızdan", "senden kurtulmak istiyorum", "tahammül edemiyorum sana",
-    "altına sıçmışsın"
+    "altına sıçmışsın", "İğreniyorum",
 ]
 
 # Logging settings
@@ -667,19 +667,29 @@ class AudioProcessor:
             "nankör": ["anker"],
             "adi herif": ["vadi herif", "hadi herif", "kerif"],
             "boğarım": ["boru"],
-            "ibne": ["gibne"],
+            "ibne": ["gibne", "ibine", "ibni", "iyi bile", "iple", "tip ne"],
             "allahın belası": ["allah'ın belası", "allahın bela"],
             "yarrak": ["yarak", "yarrağım"],
-            "orospu evladı": ["orospu evladım"],
+            "orospu evladı": ["orospu evladım", "Rus be evladı", "Bu Rus be evladı", "o Rus be evladı"],
             "eşek": ["beşik"],
-            "sik": ["piks", "fiks", "bit", "piksin"],
+            "sik": ["piks", "fiks", "bit", "pik"],
             "şerefsiz": ["terefsiz", "yerefsiz"],
             "namussuz": ["hamussuz", "humutsuz", "haa mussuz"],
             "göt": ["yut", "götsün", "göt sür"],
             "amına koyduğumun": ["hamana koydumun", "adına koduğumun"],
             "çirkef": ["çirket"],
             "kaltak": ["bir ayet etmiş kaltak"],
-            "lanet pislik": ["lanetbislik"]
+            "lanet pislik": ["lanetbislik"],
+            "orospu": ["Oro Spur", "horozku", "o rus bu", "bu ruslı", "oraz üç", "orosku", "orosluk", "oroslu"],
+            "bıktım": ["bıttın", "bıttım"],
+            "yavşak": ["Yahu şak"],
+            "nefret ediyorum": ["Efrete diyorum"],
+            "iğreniyorum": ["Yeriniyorum"],
+            "sikin": ["skin"],
+            "amına": ["namına"],
+            "orospu çocuğu": ["orası bu çocuğu", "bir orası bu çocuğun"],
+            "yarrağım": ["yarrab", "yarra?"],
+
         }
         
         normalized_text = self.normalize_text(text)
