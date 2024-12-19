@@ -89,7 +89,7 @@ TYPE1_BAD_WORDS = [
     "mal", "it", "piç", "şerefsiz", "namussuz", "top", "göt", "nankör", 
     "adi herif", "kaltak", "aşağılık", "bok herif", "kahrolası", "lanet pislik", 
     "çirkef", "yüzsüz", "arsız", "haysiyetsiz", "çakal", "seni öldürürüm", 
-    "gebertirim", "boğarım", "sikerim", "döverim"
+    "gebertirim", "boğarım", "sikerim", "döverim", "bok", "leş gibi"
 ]
 
 TYPE2_BAD_WORDS = [
@@ -670,10 +670,10 @@ class AudioProcessor:
             "nankör": ["anker"],
             "adi herif": ["vadi herif", "hadi herif", "kerif"],
             "boğarım": ["boru"],
-            "ibne": ["gibne", "ibine", "ibni", "iyi bile", "iple", "tip ne"],
+            "ibne": ["gibne", "ibine", "ibni", "iyi bile", "iple", "tip ne", "İpne.", "ipne."],
             "allahın belası": ["allah'ın belası", "allahın bela"],
-            "yarrak": ["yarak", "yarrağım"],
-            "orospu evladı": ["orospu evladım", "Rus be evladı", "Bu Rus be evladı", "o Rus be evladı"],
+            "yarrak": ["yarak", "yarrağım", "yarra"],
+            "orospu evladı": ["orospu evladım", "Rus be evladı", "Bu Rus be evladı", "o Rus be evladı", "Ruska evladı", "o rostlu", "o Ruslı"],
             "eşek": ["beşik"],
             "sik": ["piks", "fiks", "bit", "pik"],
             "şerefsiz": ["terefsiz", "yerefsiz"],
@@ -683,15 +683,17 @@ class AudioProcessor:
             "çirkef": ["çirket"],
             "kaltak": ["bir ayet etmiş kaltak"],
             "lanet pislik": ["lanetbislik"],
-            "orospu": ["Oro Spur", "horozku", "o rus bu", "bu ruslı", "oraz üç", "orosku", "orosluk", "oroslu"],
+            "orospu": ["Oro Spur", "horozku", "o rus bu", "bu ruslı", "oraz üç", "orosku", "orosluk", "oroslu", "o Rus bir", "orospa", "Ruska", "orası bu"],
             "bıktım": ["bıttın", "bıttım"],
             "yavşak": ["Yahu şak"],
             "nefret ediyorum": ["Efrete diyorum"],
-            "iğreniyorum": ["Yeriniyorum"],
+            "iğreniyorum": ["Yeriniyorum", "yeriniyorum"],
             "sikin": ["skin"],
             "amına": ["namına"],
-            "orospu çocuğu": ["orası bu çocuğu", "bir orası bu çocuğun"],
-            "yarrağım": ["yarrab", "yarra?"],
+            "orospu çocuğu": ["orası bu çocuğu", "orası bu çocuğun", "Oros bu çocuğu"],
+            "yarrağım": ["yarrab", "yarra?", "yarrağın"],
+            "sik kafalı": ["sık kafalı"],
+            "haysiyetsiz": ["hayseyesiz"]
 
         }
         
