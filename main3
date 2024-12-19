@@ -402,7 +402,9 @@ class AudioProcessor:
         return adjusted_db
 
     def normalize_text(self, text):
+        # Önce tüm metni küçük harfe çevir
         text = text.lower()
+        # Türkçe karakterleri normalize et
         replacements = {
             'İ': 'i', 'I': 'ı',
             'Ğ': 'ğ', 'Ü': 'ü',
@@ -410,8 +412,9 @@ class AudioProcessor:
             'Ö': 'ö'
         }
         for old, new in replacements.items():
-            text = text.replace(old, new)
+            text = text.replace(old.lower(), new).replace(old.upper(), new)
         
+        # Noktalama işaretlerini temizle ve boşlukları normalize et
         text = text.replace(',', ' ').replace('.', ' ').replace('?', ' ').replace('!', ' ')
         return ' '.join(text.split())
 
